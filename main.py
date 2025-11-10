@@ -4,120 +4,65 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import google.generativeai as genai
-import time
-from typing import List
-from RAG_SERVICES.vector_store import FAISSVectorStore
-from RAG_SERVICES.model_wrapper import get_multimodal_rag_response, get_text_embedding
+import asyncio
 
-# --- App Initialization ---
-# Load environment variables from .env file
+from RAG_SERVICES.vector_store import DualFAISSVectorStore
+from RAG_SERVICES.model_wrapper import get_text_embedding, get_multimodal_rag_response
+
+# --- Configuration ---
+DATA_DIR = "new_modified_data"
+TEXT_INDEX_PATH = os.path.join(DATA_DIR, "manual_text.index")
+DIAGRAM_INDEX_PATH = os.path.join(DATA_DIR, "manual_diagram.index")
+JSON_MAPPING_PATH = os.path.join(DATA_DIR, "manual.json")
+
+# --- FastAPI Setup ---
+app = FastAPI(title="Multimodal Boeing 737 RAG API", description="Retrieval-Augmented Generation with Text + Diagram Context.")
+
+# --- Load API Key ---
 load_dotenv()
-
-# Gemini API key
 api_key = os.getenv("GOOGLE_GEMINI_API_KEY")
 if not api_key:
     raise EnvironmentError("GOOGLE_GEMINI_API_KEY not found in .env file.")
 genai.configure(api_key=api_key)
 
-# Initialize FastAPI app
-app = FastAPI(
-    title="Multimodal RAG API",
-    description="API for querying a technical PDF manual using multimodal RAG.",
-    version="1.0.0"
-)
+# --- Load Vector Store ---
+vector_store = DualFAISSVectorStore(TEXT_INDEX_PATH, DIAGRAM_INDEX_PATH, JSON_MAPPING_PATH, w_text=0.6, w_diagram=0.4)
 
-# --- Global Variables ---
-vector_store: FAISSVectorStore = None
-
+# --- Request Model ---
 class QueryRequest(BaseModel):
     question: str
-    top_k: int = 5  # pages to retrieve
+    top_k: int = 5
 
-class QueryResponse(BaseModel):
-    answer: str
-    pages: List[int]
+# --- API Routes ---
+@app.get("/")
+def root():
+    return {"message": "Welcome to the Multimodal Boeing 737 RAG API"}
 
-# --- API Events ---
-@app.on_event("startup")
-def startup_event():
-    global vector_store
-
-    faiss_path = os.getenv("FAISS_PATH", "data/manual.index")
-    mapping_path = os.getenv("MAPPING_PATH", "data/manual.json")
-
-    if not os.path.exists(faiss_path) or not os.path.exists(mapping_path):
-        print("Error: FAISS index or JSON mapping not found.")
-        print("Please run `python preprocessing.py` first.")
-        vector_store = None
-    else:
-        try:
-            vector_store = FAISSVectorStore(faiss_path, mapping_path)
-            print("FAISS index and JSON mapping loaded successfully.")
-        except Exception as e:
-            print(f"Error loading vector store: {e}")
-            vector_store = None
-
-# --- API Endpoints ---
-@app.get("/", summary="Health Check")
-def read_root():
-    """Simple health check endpoint."""
-    return {"status": "ok", "message": "Multimodal RAG API is running."}
-
-@app.post("/query", response_model=QueryResponse, summary="Query the Manual")
-async def query_api(request: QueryRequest):
-    """
-    1. Embeds the user's question
-    2. Retrieves the top_k relevant pages (text + image)
-    3. Sends all context to Gemini to generate an answer
-    4. Returns the answer and the cited page numbers
-    """
-    if vector_store is None:
-        raise HTTPException(
-            status_code=500,
-            detail="Vector store not initialized. Did you run preprocessing.py?"
-        )
-
-    if not request.question:
-        raise HTTPException(status_code=400, detail="Question cannot be empty.")
-
-    start_time = time.time()
-
+@app.post("/query")
+async def query_rag(request: QueryRequest):
     try:
-        # 1. Embed the user's question
-        print(f"Embedding query: \"{request.question}\"")
-        query_vector = await get_text_embedding(
-            request.question,
-            task_type="RETRIEVAL_QUERY"
-        )
+        # 1. Embed the query
+        query_embedding = await get_text_embedding(request.question, task_type="RETRIEVAL_QUERY")
+        if query_embedding is None:
+            raise HTTPException(status_code=500, detail="Failed to generate embedding for query.")
 
-        # 2. Retrieve relevant pages
-        print(f"Searching for top {request.top_k} relevant pages...")
-        retrieved_chunks = vector_store.search(query_vector, k=request.top_k)
+        # 2. Search both indices
+        retrieved_chunks = vector_store.search(query_embedding, k=request.top_k)
+        if not retrieved_chunks:
+            return {"answer": "No relevant information found in the manual.", "chunks": []}
 
-        page_numbers = sorted(list(set([chunk['page_number'] for chunk in retrieved_chunks])))
-        print(f"Retrieved context from pages: {page_numbers}")
+        # 3. Generate final multimodal answer
+        final_answer = await get_multimodal_rag_response(request.question, retrieved_chunks)
 
-        # 3. Generate a response using the multimodal model
-        print("Generating answer with multimodal context...")
-        generated_answer = await get_multimodal_rag_response(
-            question=request.question,
-            chunks=retrieved_chunks
-        )
-
-        end_time = time.time()
-        print(f"Query processed in {end_time - start_time:.2f} seconds.")
-
-        # 4. Return the response
-        return QueryResponse(
-            answer=generated_answer,
-            pages=page_numbers
-        )
+        return {
+            "question": request.question,
+            "answer": final_answer,
+            "retrieved_chunks": retrieved_chunks
+        }
 
     except Exception as e:
-        print(f"Error during query processing: {e}")
-        raise HTTPException(status_code=500, detail=f"An internal error occurred: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-# --- Run the Server ---
+# --- Entry Point ---
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=8000)

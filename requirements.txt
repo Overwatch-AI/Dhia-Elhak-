@@ -16,3 +16,4 @@ accelerate
 bitsandbytes
 dotenv
 faiss-cpu
+annoy
