@@ -2,17 +2,15 @@ import os
 import mimetypes
 import base64
 import time
+import re
 from typing import List, Dict, Any, Tuple
 import google.generativeai as genai
 from google.generativeai.types import GenerationConfig
 
-# from sentence_transformers import SentenceTransformer
-# embedding_model = SentenceTransformer(model_name_or_path="all-mpnet-base-v2", device="cpu")
 
 # --- Configuration ---
 
 # Use a multimodal model that can understand text and images
-# gemini-2.5-flash-preview-09-2025 is a great choice for speed and multimodality
 GENERATION_MODEL_NAME = "gemini-2.5-flash-preview-09-2025"
 
 # Use the latest embedding model
@@ -46,7 +44,6 @@ def _create_multimodal_prompt(question: str, chunks: List[Dict[str, Any]]) -> Li
     """
 
     # 1. System Instruction
-    # This guides the model on its role and how to use the context.
     page_numbers = sorted(list(set([c["page_number"] for c in chunks])))
     system_instruction = f"""
     You are an expert aviation assistant for a Boeing 737.
@@ -61,6 +58,14 @@ def _create_multimodal_prompt(question: str, chunks: List[Dict[str, Any]]) -> Li
     4.  Analyze both the text and the images (diagrams, tables, schemas) to formulate your answer.
     5.  Provide a clear, concise, and accurate answer to the user's question.
     6.  Do NOT repeat the page numbers in your final answer. The system will cite them. Just provide the answer. 
+    [IMPORTANT OUTPUT FORMAT]
+    At the end of your answer, on a new line, include the list of relevant pages in the following exact format:
+    Relevant Pages: [page_numbers]
+
+    For example:
+    Relevant Pages: [12]
+    or
+    Relevant Pages: [41, 42] 
     """
 
     # 2. Construct the prompt parts list
@@ -134,7 +139,7 @@ async def get_text_embedding(text: str, task_type: str = "RETRIEVAL_DOCUMENT", r
     return None
 
 
-async def get_multimodal_rag_response(question: str, chunks: List[Dict[str, Any]]) -> str:
+async def get_multimodal_rag_response(question: str, chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Generates the final answer using the multimodal RAG chain.
 
@@ -143,7 +148,11 @@ async def get_multimodal_rag_response(question: str, chunks: List[Dict[str, Any]
         chunks: The list of retrieved page-chunks (from FAISSVectorStore).
 
     Returns:
-        The generated text answer.
+        A dict containing:
+        {
+            "answer": "...",
+            "pages": [...]
+        }
     """
     try:
         # 1. Initialize the generative model
@@ -154,7 +163,7 @@ async def get_multimodal_rag_response(question: str, chunks: List[Dict[str, Any]
 
         # 3. Configure generation
         generation_config = GenerationConfig(
-            temperature=0.1,  # Low temperature for factual answers
+            temperature=0.1,
             top_p=0.95,
             top_k=40,
             max_output_tokens=2048,
@@ -166,9 +175,29 @@ async def get_multimodal_rag_response(question: str, chunks: List[Dict[str, Any]
             generation_config=generation_config,
         )
 
-        # 5. Return the text part of the response
-        return response.text
+        # 5. Extract the raw answer text
+        answer_text = response.text.strip() if response.text else ""
+
+        # 6. Extract pages in format [81], [12, 13] 
+        page_matches = re.findall(r"Relevant Pages:\s*\[(.*?)\]", answer_text)
+        pages = []
+        if page_matches:
+            # Extract numbers and split if multiple
+            pages = [int(p.strip()) for p in page_matches[0].split(",") if p.strip().isdigit()]
+
+        # --- Remove any bracketed or "Relevant Pages" references from the displayed answer ---
+        clean_answer = re.sub(r"Relevant Pages:\s*\[.*?\]", "", answer_text)
+        clean_answer = re.sub(r"\[\d+(?:,\s*\d+)*\]", "", clean_answer).strip()
+        print(clean_answer)
+        # 8. Return the structured response
+        return {
+            "answer": clean_answer,
+            "pages": pages
+        }
 
     except Exception as e:
         print(f"Error during multimodal generation: {e}")
-        return f"Error: Could not generate a response. {str(e)}"
+        return {
+            "answer": f"Error: Could not generate a response. {str(e)}",
+            "pages": []
+        }
