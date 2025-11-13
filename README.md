@@ -145,10 +145,10 @@ pip install -r requirements.txt
 
 # 3) copy example env and edit
 cp .env.example .env
-# edit .env -> set API keys and model names (e.g., GEMINI_API_KEY, VLM_MODEL, EMB_MODEL, etc.)
+# edit .env -> set API keys and model names (e.g., GEMINI_API_KEY ...)
 
 # 4) generate the processed dataset (this creates new_data/)
-python preprocessing.py
+python Preprocessing.py
 
 # 5) run the backend server
 python main.py
