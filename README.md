@@ -14,7 +14,6 @@
 3. [File / Folder Overview](#3-file--folder-overview)  
 4. [How to run (local, minimal)](#4-how-to-run-local-minimal)  
 5. [Notes, configuration & best practices](#5-notes-configuration--best-practices)  
-6. [Contributing / License / Contact](#6-contributing--license--contact)
 
 ---
 
